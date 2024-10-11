@@ -77,7 +77,12 @@ expressWs(app);
 
     const api_v2 = require('./api/v2');
     app.use('/api/v2', api_v2);
-    app.use('/api/v2', api_v2);
+
+    const { version } = require('../package.json');
+
+    app.get('/', (req, res, next) => {
+        return res.status(200).send({ message: `Piston v${version}` });
+    });
 
     app.use((req, res, next) => {
         return res.status(404).send({ message: 'Not Found' });
@@ -86,7 +91,12 @@ expressWs(app);
     logger.debug('Calling app.listen');
     const [address, port] = config.bind_address.split(':');
 
-    app.listen(port, address, () => {
+    const server = app.listen(port, address, () => {
         logger.info('API server started on', config.bind_address);
+    });
+
+    process.on('SIGTERM', () => {
+        server.close();
+        process.exit(0)
     });
 })();

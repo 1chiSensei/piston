@@ -41,21 +41,6 @@
 
 <br>
 
-# Notes About Hacktoberfest
-
-While we are accepting pull requests for Hacktoberfest, we will reject any low-quality PRs.
-If we see PR abuse for Hacktoberfest, we will stop providing Hacktoberfest approval for pull requests.
-
-We are accepting PRs for:
-
--   Packages - updating package versions, adding new packages
--   Documentation updates
--   CLI/API improvements - please discuss these with us in the Discord first
-
-Any queries or concerns, ping @HexF#0015 in the Discord.
-
-<br>
-
 # About
 
 <h4>
@@ -86,6 +71,7 @@ The following are approved and endorsed extensions/utilities to the core Piston 
 -   [Pyston](https://github.com/ffaanngg/pyston), a Python wrapper for accessing the Piston API.
 -   [Go-Piston](https://github.com/milindmadhukar/go-piston), a Golang wrapper for accessing the Piston API.
 -   [piston_rs](https://github.com/Jonxslays/piston_rs), a Rust wrapper for accessing the Piston API.
+-   [piston_rspy](https://github.com/Jonxslays/piston_rspy), Python bindings for accessing the Piston API via `piston_rs`.
 
 <br>
 
@@ -103,11 +89,10 @@ GET  https://emkc.org/api/v2/piston/runtimes
 POST https://emkc.org/api/v2/piston/execute
 ```
 
-> Important Note: The Piston API is rate limited to 5 requests per second. If you have a need for more requests than that
-> and it's for a good cause, please reach out to me (EngineerMan#0001) on [Discord](https://discord.gg/engineerman)
-> so we can discuss potentially getting you an unlimited key. What is and isn't a good cause is up to me, but, in general
-> if your project is a) open source, b) helping people at no cost to them, and c) not likely to use tons of resources
-> thereby impairing another's ability to enjoy Piston, you'll likely be granted a key.
+> Important Note: The Piston API is rate limited to 5 requests per second. Effective May 7, 2024, no additional
+> unlimited keys will be granted and existing keys will be revoked on Jan 1, 2025. The public instance is at
+> capacity and the public limit is already very generous. For usage beyond 5 requests/second, you should
+> consider self hosting.
 
 <br>
 
@@ -119,7 +104,8 @@ POST https://emkc.org/api/v2/piston/execute
 
 -   Docker
 -   Docker Compose
--   Node JS (>= 13, preferably >= 15)
+-   Node JS (>= 15)
+-   cgroup v2 enabled, and cgroup v1 disabled
 
 ### After system dependencies are installed, clone this repository:
 
@@ -127,6 +113,10 @@ POST https://emkc.org/api/v2/piston/execute
 # clone and enter repo
 git clone https://github.com/engineer-man/piston
 ```
+
+> [!NOTE]
+>
+> Ensure the repository is cloned with LF line endings
 
 ### Installation
 
@@ -150,8 +140,8 @@ The API will now be online with no language runtimes installed. To install runti
 
 ```sh
 docker run \
+    --privileged \
     -v $PWD:'/piston' \
-    --tmpfs /piston/jobs \
     -dit \
     -p 2000:2000 \
     --name piston_api \
@@ -260,8 +250,10 @@ This endpoint requests execution of some arbitrary code.
 -   `files[].encoding` (_optional_) The encoding scheme used for the file content. One of `base64`, `hex` or `utf8`. Defaults to `utf8`.
 -   `stdin` (_optional_) The text to pass as stdin to the program. Must be a string or left out. Defaults to blank string.
 -   `args` (_optional_) The arguments to pass to the program. Must be an array or left out. Defaults to `[]`.
--   `compile_timeout` (_optional_) The maximum time allowed for the compile stage to finish before bailing out in milliseconds. Must be a number or left out. Defaults to `10000` (10 seconds).
--   `run_timeout` (_optional_) The maximum time allowed for the run stage to finish before bailing out in milliseconds. Must be a number or left out. Defaults to `3000` (3 seconds).
+-   `compile_timeout` (_optional_) The maximum wall-time allowed for the compile stage to finish before bailing out in milliseconds. Must be a number or left out. Defaults to `10000` (10 seconds).
+-   `run_timeout` (_optional_) The maximum wall-time allowed for the run stage to finish before bailing out in milliseconds. Must be a number or left out. Defaults to `3000` (3 seconds).
+-   `compile_cpu_time` (_optional_) The maximum CPU-time allowed for the compile stage to finish before bailing out in milliseconds. Must be a number or left out. Defaults to `10000` (10 seconds).
+-   `run_cpu_time` (_optional_) The maximum CPU-time allowed for the run stage to finish before bailing out in milliseconds. Must be a number or left out. Defaults to `3000` (3 seconds).
 -   `compile_memory_limit` (_optional_) The maximum amount of memory the compile stage is allowed to use in bytes. Must be a number or left out. Defaults to `-1` (no limit)
 -   `run_memory_limit` (_optional_) The maximum amount of memory the run stage is allowed to use in bytes. Must be a number or left out. Defaults to `-1` (no limit)
 
@@ -279,6 +271,8 @@ This endpoint requests execution of some arbitrary code.
     "args": ["1", "2", "3"],
     "compile_timeout": 10000,
     "run_timeout": 3000,
+    "compile_cpu_time": 10000,
+    "run_cpu_time": 3000,
     "compile_memory_limit": -1,
     "run_memory_limit": -1
 }
@@ -288,7 +282,14 @@ A typical response upon successful execution will contain 1 or 2 keys `run` and 
 `compile` will only be present if the language requested requires a compile stage.
 
 Each of these keys has an identical structure, containing both a `stdout` and `stderr` key, which is a string containing the text outputted during the stage into each buffer.
-It also contains the `code` and `signal` which was returned from each process.
+It also contains the `code` and `signal` which was returned from each process. It also includes a nullable human-readable `message` which is a description of why a stage has failed and a two-letter `status` that is either:
+
+-   `RE` for runtime error
+-   `SG` for dying on a signal
+-   `TO` for timeout (either via `timeout` or `cpu_time`)
+-   `OL` for stdout length exceeded
+-   `EL` for stderr length exceeded
+-   `XX` for internal error
 
 ```json
 HTTP/1.1 200 OK
@@ -302,7 +303,12 @@ Content-Type: application/json
         "stderr": "",
         "output": "[\n  '/piston/packages/node/15.10.0/bin/node',\n  '/piston/jobs/9501b09d-0105-496b-b61a-e5148cf66384/my_cool_code.js',\n  '1',\n  '2',\n  '3'\n]\n",
         "code": 0,
-        "signal": null
+        "signal": null,
+        "message": null,
+        "status": null,
+        "cpu_time": 8,
+        "wall_time": 154,
+        "memory": 1160000
     }
 }
 ```
@@ -318,6 +324,40 @@ Content-Type: application/json
 }
 ```
 
+#### Interactive execution endpoint (not available through the public API)
+
+To interact with running processes in real time, you can establish a WebSocket connection at `/api/v2/connect`. This allows you to both receive output and send input to active processes.
+
+Each message is structured as a JSON object with a `type` key, which indicates the action to perform. Below is a list of message types, their directions, and descriptions:
+
+-   **init** (client -> server): Initializes a job with the same parameters as the `/execute` endpoint, except that stdin is discarded.
+-   **runtime** (server -> client): Provides details on the runtime environment, including the version and language.
+-   **stage** (server -> client): Indicates the current execution stage, either "compile" or "run."
+-   **data** (server <-> client): Exchanges data between the client and server, such as stdin, stdout, or stderr streams.
+-   **signal** (client -> server): Sends a signal (e.g., for termination) to the running process, whether it's in the "compile" or "run" stage.
+-   **exit** (server -> client): Signals the end of a stage, along with the exit code or signal.
+-   **error** (server -> client): Reports an error, typically right before the WebSocket is closed.
+
+An example of this endpoint in use is depicted below (**<** = client to server, **>** = server to client)
+
+1. Client establishes WebSocket connection to `/api/v2/connect`
+2. **<** `{"type":"init", "language":"bash", "version":"*", "files":[{"content": "cat"}]}`
+3. **>** `{"type":"runtime","language": "bash", "version": "5.1.0"}`
+4. **>** `{"type":"stage", "stage":"run"}`
+5. **<** `{"type":"data", "stream":"stdin", "data":"Hello World!"}`
+6. **>** `{"type":"data", "stream":"stdout", "data":"Hello World!"}`
+7. _time passes_
+8. **>** `{"type":"exit", "stage":"run", "code":null, "signal": "SIGKILL"}`
+
+Errors may return status codes as follows:
+
+-   **4000: Already Initialized**: Sent when a second `init` command is issued.
+-   **4001: Initialization Timeout**: No `init` command was sent within 1 second of connection.
+-   **4002: Notified Error**: A fatal error occurred, and an `error` packet was transmitted.
+-   **4003: Not yet Initialized**: A non-`init` command was sent without a job context.
+-   **4004: Can only write to stdin**: The client attempted to write to a stream other than stdin.
+-   **4005: Invalid Signal**: An invalid signal was sent in a `signal` packet.
+
 <br>
 
 # Supported Languages
@@ -325,7 +365,9 @@ Content-Type: application/json
 `awk`,
 `bash`,
 `befunge93`,
+`brachylog`,
 `brainfuck`,
+`bqn`,
 `c`,
 `c++`,
 `cjam`,
@@ -342,9 +384,11 @@ Content-Type: application/json
 `dragon`,
 `elixir`,
 `emacs`,
+`emojicode`,
 `erlang`,
 `file`,
 `forte`,
+`forth`,
 `fortran`,
 `freebasic`,
 `fsharp.net`,
@@ -365,6 +409,7 @@ Content-Type: application/json
 `llvm_ir`,
 `lolcode`,
 `lua`,
+`matl`,
 `nasm`,
 `nasm64`,
 `nim`,
@@ -389,7 +434,9 @@ Content-Type: application/json
 `rscript`,
 `ruby`,
 `rust`,
+`samarium`,
 `scala`,
+`smalltalk`,
 `sqlite3`,
 `swift`,
 `typescript`,
@@ -404,26 +451,26 @@ Content-Type: application/json
 
 # Principle of Operation
 
-Piston uses Docker as the primary mechanism for sandboxing. There is an API within the container written in Node
-which takes in execution requests and executees them within the container safely.
-High level, the API writes any source code to a temporary directory in `/piston/jobs`.
+Piston uses [Isolate](https://www.ucw.cz/moe/isolate.1.html) inside Docker as the primary mechanism for sandboxing. There is an API within the container written in Node
+which takes in execution requests and executes them within the container safely.
+High level, the API writes any source code and executes it inside an Isolate sandbox.
 The source file is either ran or compiled and ran (in the case of languages like c, c++, c#, go, etc.).
 
 <br>
 
 # Security
 
-Docker provides a great deal of security out of the box in that it's separate from the system.
-Piston takes additional steps to make it resistant to
-various privilege escalation, denial-of-service, and resource saturation threats. These steps include:
+Piston uses Isolate which makes use of Linux namespaces, chroot, multiple unprivileged users, and cgroup for sandboxing and resource limiting. Code execution submissions on Piston shall not be aware of each other, shall not affect each other and shall not affect the underlying host system. This is ensured through multiple steps including:
 
--   Disabling outgoing network interaction
+-   Disabling outgoing network interaction by default
 -   Capping max processes at 256 by default (resists `:(){ :|: &}:;`, `while True: os.fork()`, etc.)
 -   Capping max files at 2048 (resists various file based attacks)
 -   Cleaning up all temp space after each execution (resists out of drive space attacks)
--   Running as a variety of unprivileged users
--   Capping runtime execution at 3 seconds
--   Capping stdout to 65536 characters (resists yes/no bombs and runaway output)
+-   Running each submission as a different unprivileged user
+-   Running each submission with its own isolated Linux namespaces
+-   Capping runtime execution at 3 seconds by default (CPU-time and wall-time)
+-   Capping the peak memory that all the submission's processes can use
+-   Capping stdout to 1024 characters by default (resists yes/no bombs and runaway output)
 -   SIGKILLing misbehaving code
 
 <br>

@@ -14,13 +14,6 @@ docker_compose(){
     fi
 }
 
-init_precommit() {
-    if [ $PISTON_ENV == "dev" ]; then
-        rm -f .git/hooks/pre-commit
-        ln -s "$PISTON_PATH/pre-commit" "$PISTON_PATH/.git/hooks/pre-commit"
-    fi
-}
-
 case $1 in
     help)
         echo "=== Piston Management ==="
@@ -66,14 +59,12 @@ case $1 in
 
     restart) docker_compose restart ;;
     start)
-        init_precommit
         docker_compose up -d
         ;;
     stop) docker_compose down ;;
     bash) docker_compose exec api /bin/bash ;;
 
     rebuild)
-        init_precommit
         docker_compose build && docker_compose up -d
         ;;
 
@@ -87,7 +78,7 @@ case $1 in
     clean-pkgs) git clean -fqXd packages ;;
     clean-repo) git clean -fqXd repo ;;
 
-    list-pkgs) find packages -depth 2 | awk -F/ '$2 && $3{ print $2 "-" $3 }' | column ;;
+    list-pkgs) find packages -maxdepth 2 | awk -F/ '$2 && $3{ print $2 "-" $3 }' | column ;;
 
     build-pkg)
         PKGSLUG="$2-$3"

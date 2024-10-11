@@ -6,49 +6,8 @@ const events = require('events');
 const runtime = require('../runtime');
 const { Job } = require('../job');
 const package = require('../package');
+const globals = require('../globals');
 const logger = require('logplease').create('api/v2');
-
-const SIGNALS = [
-    'SIGABRT',
-    'SIGALRM',
-    'SIGBUS',
-    'SIGCHLD',
-    'SIGCLD',
-    'SIGCONT',
-    'SIGEMT',
-    'SIGFPE',
-    'SIGHUP',
-    'SIGILL',
-    'SIGINFO',
-    'SIGINT',
-    'SIGIO',
-    'SIGIOT',
-    'SIGKILL',
-    'SIGLOST',
-    'SIGPIPE',
-    'SIGPOLL',
-    'SIGPROF',
-    'SIGPWR',
-    'SIGQUIT',
-    'SIGSEGV',
-    'SIGSTKFLT',
-    'SIGSTOP',
-    'SIGTSTP',
-    'SIGSYS',
-    'SIGTERM',
-    'SIGTRAP',
-    'SIGTTIN',
-    'SIGTTOU',
-    'SIGUNUSED',
-    'SIGURG',
-    'SIGUSR1',
-    'SIGUSR2',
-    'SIGVTALRM',
-    'SIGXCPU',
-    'SIGXFSZ',
-    'SIGWINCH',
-];
-// ref: https://man7.org/linux/man-pages/man7/signal.7.html
 
 function get_job(body) {
     let {
@@ -61,6 +20,8 @@ function get_job(body) {
         run_memory_limit,
         run_timeout,
         compile_timeout,
+        run_cpu_time,
+        compile_cpu_time,
     } = body;
 
     return new Promise((resolve, reject) => {
@@ -106,7 +67,7 @@ function get_job(body) {
             });
         }
 
-        for (const constraint of ['memory_limit', 'timeout']) {
+        for (const constraint of ['memory_limit', 'timeout', 'cpu_time']) {
             for (const type of ['compile', 'run']) {
                 const constraint_name = `${type}_${constraint}`;
                 const constraint_value = body[constraint_name];
@@ -135,23 +96,23 @@ function get_job(body) {
             }
         }
 
-        compile_timeout = compile_timeout || rt.timeouts.compile;
-        run_timeout = run_timeout || rt.timeouts.run;
-        compile_memory_limit = compile_memory_limit || rt.memory_limits.compile;
-        run_memory_limit = run_memory_limit || rt.memory_limits.run;
         resolve(
             new Job({
                 runtime: rt,
-                args: args || [],
-                stdin: stdin || '',
+                args: args ?? [],
+                stdin: stdin ?? '',
                 files,
                 timeouts: {
-                    run: run_timeout,
-                    compile: compile_timeout,
+                    run: run_timeout ?? rt.timeouts.run,
+                    compile: compile_timeout ?? rt.timeouts.compile,
+                },
+                cpu_times: {
+                    run: run_cpu_time ?? rt.cpu_times.run,
+                    compile: compile_cpu_time ?? rt.cpu_times.compile,
                 },
                 memory_limits: {
-                    run: run_memory_limit,
-                    compile: compile_memory_limit,
+                    run: run_memory_limit ?? rt.memory_limits.run,
+                    compile: compile_memory_limit ?? rt.memory_limits.compile,
                 },
             })
         );
@@ -163,7 +124,7 @@ router.use((req, res, next) => {
         return next();
     }
 
-    if (!req.headers['content-type'].startsWith('application/json')) {
+    if (!req.headers['content-type']?.startsWith('application/json')) {
         return res.status(415).send({
             message: 'requests must be of type application/json',
         });
@@ -174,9 +135,9 @@ router.use((req, res, next) => {
 
 router.ws('/connect', async (ws, req) => {
     let job = null;
-    let eventBus = new events.EventEmitter();
+    let event_bus = new events.EventEmitter();
 
-    eventBus.on('stdout', data =>
+    event_bus.on('stdout', data =>
         ws.send(
             JSON.stringify({
                 type: 'data',
@@ -185,7 +146,7 @@ router.ws('/connect', async (ws, req) => {
             })
         )
     );
-    eventBus.on('stderr', data =>
+    event_bus.on('stderr', data =>
         ws.send(
             JSON.stringify({
                 type: 'data',
@@ -194,10 +155,10 @@ router.ws('/connect', async (ws, req) => {
             })
         )
     );
-    eventBus.on('stage', stage =>
+    event_bus.on('stage', stage =>
         ws.send(JSON.stringify({ type: 'stage', stage }))
     );
-    eventBus.on('exit', (stage, status) =>
+    event_bus.on('exit', (stage, status) =>
         ws.send(JSON.stringify({ type: 'exit', stage, ...status }))
     );
 
@@ -210,19 +171,27 @@ router.ws('/connect', async (ws, req) => {
                     if (job === null) {
                         job = await get_job(msg);
 
-                        await job.prime();
+                        try {
+                            const box = await job.prime();
 
-                        ws.send(
-                            JSON.stringify({
-                                type: 'runtime',
-                                language: job.runtime.language,
-                                version: job.runtime.version.raw,
-                            })
-                        );
+                            ws.send(
+                                JSON.stringify({
+                                    type: 'runtime',
+                                    language: job.runtime.language,
+                                    version: job.runtime.version.raw,
+                                })
+                            );
 
-                        await job.execute_interactive(eventBus);
-
-                        ws.close(4999, 'Job Completed');
+                            await job.execute(box, event_bus);
+                        } catch (error) {
+                            logger.error(
+                                `Error cleaning up job: ${job.uuid}:\n${error}`
+                            );
+                            throw error;
+                        } finally {
+                            await job.cleanup();
+                        }
+                        ws.close(4999, 'Job Completed'); // Will not execute if an error is thrown above
                     } else {
                         ws.close(4000, 'Already Initialized');
                     }
@@ -230,7 +199,7 @@ router.ws('/connect', async (ws, req) => {
                 case 'data':
                     if (job !== null) {
                         if (msg.stream === 'stdin') {
-                            eventBus.emit('stdin', msg.data);
+                            event_bus.emit('stdin', msg.data);
                         } else {
                             ws.close(4004, 'Can only write to stdin');
                         }
@@ -240,8 +209,10 @@ router.ws('/connect', async (ws, req) => {
                     break;
                 case 'signal':
                     if (job !== null) {
-                        if (SIGNALS.includes(msg.signal)) {
-                            eventBus.emit('signal', msg.signal);
+                        if (
+                            Object.values(globals.SIGNALS).includes(msg.signal)
+                        ) {
+                            event_bus.emit('signal', msg.signal);
                         } else {
                             ws.close(4005, 'Invalid signal');
                         }
@@ -257,12 +228,6 @@ router.ws('/connect', async (ws, req) => {
         }
     });
 
-    ws.on('close', async () => {
-        if (job !== null) {
-            await job.cleanup();
-        }
-    });
-
     setTimeout(() => {
         //Terminate the socket after 1 second, if not initialized.
         if (job === null) ws.close(4001, 'Initialization Timeout');
@@ -270,18 +235,32 @@ router.ws('/connect', async (ws, req) => {
 });
 
 router.post('/execute', async (req, res) => {
+    let job;
     try {
-        const job = await get_job(req.body);
+        job = await get_job(req.body);
+    } catch (error) {
+        return res.status(400).json(error);
+    }
+    try {
+        const box = await job.prime();
 
-        await job.prime();
-
-        const result = await job.execute();
-
-        await job.cleanup();
+        let result = await job.execute(box);
+        // Backward compatibility when the run stage is not started
+        if (result.run === undefined) {
+            result.run = result.compile;
+        }
 
         return res.status(200).send(result);
     } catch (error) {
-        return res.status(400).json(error);
+        logger.error(`Error executing job: ${job.uuid}:\n${error}`);
+        return res.status(500).send();
+    } finally {
+        try {
+            await job.cleanup(); // This gets executed before the returns in try/catch
+        } catch (error) {
+            logger.error(`Error cleaning up job: ${job.uuid}:\n${error}`);
+            return res.status(500).send(); // On error, this replaces the return in the outer try-catch
+        }
     }
 });
 
